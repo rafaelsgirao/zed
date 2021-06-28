@@ -1,3 +1,5 @@
+platform: '!windows'
+
 script: |
   source mockzui.sh
   zed create test
