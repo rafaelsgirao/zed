@@ -1,0 +1,71 @@
+<!doctype html>
+<!--
+Copyright 2018 The Go Authors. All rights reserved.
+Use of this source code is governed by a BSD-style
+license that can be found in the LICENSE file.
+-->
+<html>
+
+	<head>
+		<meta charset="utf-8">
+		<title>Zed Wasm</title>
+	</head>
+
+	<body>
+		<script src="wasm_exec.js"></script>
+		<script>
+			if (!WebAssembly.instantiateStreaming) { // polyfill
+				WebAssembly.instantiateStreaming = async (resp, importObject) => {
+					const source = await (await resp).arrayBuffer();
+					return await WebAssembly.instantiate(source, importObject);
+				};
+			}
+
+			const go = new Go();
+			let mod, inst;
+			WebAssembly.instantiateStreaming(fetch("zed.wasm"), go.importObject).then((result) => {
+				mod = result.module;
+				inst = result.instance;
+				document.getElementById("runButton").disabled = false;
+			}).catch((err) => {
+				console.error(err);
+			});
+
+			const decoder = new TextDecoder("utf-8");
+
+			async function run() {
+				let output = document.getElementById("output")
+				output.value = ''
+				globalThis.fs.writeSync = function (fd, buf) {
+					output.value += decoder.decode(buf);
+					output.style.height = output.scrollHeight + 'px'
+					return buf.length;
+				}
+
+				go.argv = [
+					"js",
+					document.getElementById("program").value,
+					document.getElementById("input").value,
+				]
+				await go.run(inst);
+				inst = await WebAssembly.instantiate(mod, go.importObject); // reset instance
+			}
+		</script>
+
+		<label for="program">Zed Program</label>
+		<textarea id="program" autofocus>yield this+1</textarea>
+
+		<br>
+
+		<label for="input">Input</label>
+		<textarea id="input">1 2 3</textarea>
+
+		<br>
+
+		<label for="output">Output</label>
+		<textarea id="output"></textarea>
+
+		<button onClick="run();" id="runButton" disabled>Run</button>
+	</body>
+
+</html>
