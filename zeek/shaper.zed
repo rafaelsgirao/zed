@@ -7,7 +7,7 @@ type port=uint16
 type zenum=string
 type conn_id={orig_h:ip,orig_p:port,resp_h:ip,resp_p:port}
 
-const schemas = |{
+const zeek_log_types = |{
   "analyzer": <{_path:string,ts:time,cause:string,analyzer_kind:string,analyzer_name:string,uid:string,fuid:string,id:conn_id,failure_reason:string,failure_data:string,_write_ts:time}>,
   "broker": <{_path:string,ts:time,ty:zenum,ev:string,peer:{address:string,bound_port:port},message:string,_write_ts:time}>,
   "capture_loss": <{_path:string,ts:time,ts_delta:duration,peer:string,gaps:uint64,acks:uint64,percent_lost:float64,_write_ts:time}>,
@@ -70,8 +70,8 @@ const schemas = |{
 
 yield nest_dotted(this)
 | switch has(_path) (
-  case true => switch (_path in schemas) (
-    case true => yield {_original: this, _shaped: shape(schemas[_path])}
+  case true => switch (_path in zeek_log_types) (
+    case true => yield {_original: this, _shaped: shape(zeek_log_types[_path])}
       | yield has_error(_shaped)
         ? error({msg: "shaper error(s): see inner error value(s) for details", _original, _shaped})
         : _shaped
