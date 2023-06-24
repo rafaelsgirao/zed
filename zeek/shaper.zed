@@ -82,22 +82,16 @@ yield nest_dotted(this)
             case true => put _cropped := crop(_shaped, zeek_log_types[_shaped._path])
               | switch (_cropped == _shaped) (
                 case true => yield _shaped
-                case false => yield error({msg: "shaper error: fields were cropped", _original, _shaped, _cropped})
+                case false => yield {_original, _shaped, _cropped}
+                  | switch _error_if_cropped (
+                    case true => yield error({msg: "shaper error: fields were cropped", _original, _shaped, _cropped})
+                    case false => yield _cropped
+                  )
               )
             case false => yield _shaped
           )
       )
-    case false => yield error({msg: "shaper error: _path value " + _path + " not found in shaper config", _original: this})
+    case false => yield error({msg: "shaper error: _path '" + _path + "' is not a known zeek log type in shaper config", _original: this})
   )
   case false => yield error({msg: "shaper error: input record lacks _path field", _original: this})
 )
-
-//              | switch (_cropped == _shaped) (
-//                case true => yield _shaped
-//                case false => yield error({msg: "shaper error: fields had to be cropped", _original, _shaped, _cropped})
-//              )
-
-//          | switch _crop_records (
-//            case true => put _cropped := crop(_shaped, zeek_log_types[_path])
-//            case false => yield _shaped
-//          )
