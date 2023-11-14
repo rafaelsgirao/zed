@@ -6,12 +6,15 @@ import (
 	"io"
 
 	"github.com/brimdata/zed"
+	"github.com/brimdata/zed/compiler/optimizer/demand"
 	"github.com/brimdata/zed/lake"
+	"github.com/brimdata/zed/lake/commits"
 	"github.com/brimdata/zed/lake/data"
 	"github.com/brimdata/zed/runtime/expr"
 	"github.com/brimdata/zed/runtime/op"
 	"github.com/brimdata/zed/runtime/op/merge"
 	"github.com/brimdata/zed/zbuf"
+	"github.com/brimdata/zed/zio/vngio"
 	"github.com/brimdata/zed/zio/zngio"
 	"github.com/brimdata/zed/zson"
 )
@@ -21,24 +24,33 @@ import (
 type SequenceScanner struct {
 	parent      zbuf.Puller
 	scanner     zbuf.Puller
+	demand      demand.Demand
 	filter      zbuf.Filter
 	pruner      expr.Evaluator
 	octx        *op.Context
 	pool        *lake.Pool
 	progress    *zbuf.Progress
+	snap        commits.View
 	unmarshaler *zson.UnmarshalZNGContext
 	done        bool
 	err         error
 }
 
-func NewSequenceScanner(octx *op.Context, parent zbuf.Puller, pool *lake.Pool, filter zbuf.Filter, pruner expr.Evaluator, progress *zbuf.Progress) *SequenceScanner {
+func NewSequenceScanner(octx *op.Context, parent zbuf.Puller, pool *lake.Pool, demand demand.Demand, filter zbuf.Filter,
+	pruner expr.Evaluator, progress *zbuf.Progress) *SequenceScanner {
+	snapshotAble, ok := parent.(interface{ Snapshot() commits.View })
+	if !ok {
+		panic(parent)
+	}
 	return &SequenceScanner{
 		octx:        octx,
 		parent:      parent,
+		demand:      demand,
 		filter:      filter,
 		pruner:      pruner,
 		pool:        pool,
 		progress:    progress,
+		snap:        snapshotAble.Snapshot(),
 		unmarshaler: zson.NewZNGUnmarshaler(),
 	}
 }
@@ -73,7 +85,7 @@ func (s *SequenceScanner) Pull(done bool) (zbuf.Batch, error) {
 				s.close(err)
 				return nil, err
 			}
-			s.scanner, _, err = newScanner(s.octx.Context, s.octx.Zctx, s.pool, s.unmarshaler, s.pruner, s.filter, s.progress, &vals[0])
+			s.scanner, _, err = newScanner(s.octx.Context, s.octx.Zctx, s.pool, s.unmarshaler, s.snap, s.demand, s.pruner, s.filter, s.progress, &vals[0])
 			if err != nil {
 				s.close(err)
 				return nil, err
@@ -96,7 +108,8 @@ func (s *SequenceScanner) close(err error) {
 	s.done = true
 }
 
-func newScanner(ctx context.Context, zctx *zed.Context, pool *lake.Pool, u *zson.UnmarshalZNGContext, pruner expr.Evaluator, filter zbuf.Filter, progress *zbuf.Progress, val *zed.Value) (zbuf.Puller, *data.Object, error) {
+func newScanner(ctx context.Context, zctx *zed.Context, pool *lake.Pool, u *zson.UnmarshalZNGContext, snap commits.View, demand demand.Demand,
+	pruner expr.Evaluator, filter zbuf.Filter, progress *zbuf.Progress, val *zed.Value) (zbuf.Puller, *data.Object, error) {
 	named, ok := val.Type.(*zed.TypeNamed)
 	if !ok {
 		return nil, nil, errors.New("system error: SequenceScanner encountered unnamed object")
@@ -115,11 +128,12 @@ func newScanner(ctx context.Context, zctx *zed.Context, pool *lake.Pool, u *zson
 		}
 		objects = part.Objects
 	}
-	scanner, err := newObjectsScanner(ctx, zctx, pool, objects, pruner, filter, progress)
+	scanner, err := newObjectsScanner(ctx, zctx, pool, snap, objects, demand, pruner, filter, progress)
 	return scanner, objects[0], err
 }
 
-func newObjectsScanner(ctx context.Context, zctx *zed.Context, pool *lake.Pool, objects []*data.Object, pruner expr.Evaluator, filter zbuf.Filter, progress *zbuf.Progress) (zbuf.Puller, error) {
+func newObjectsScanner(ctx context.Context, zctx *zed.Context, pool *lake.Pool, snap commits.View, objects []*data.Object, demand demand.Demand,
+	pruner expr.Evaluator, filter zbuf.Filter, progress *zbuf.Progress) (zbuf.Puller, error) {
 	pullers := make([]zbuf.Puller, 0, len(objects))
 	pullersDone := func() {
 		for _, puller := range pullers {
@@ -127,7 +141,7 @@ func newObjectsScanner(ctx context.Context, zctx *zed.Context, pool *lake.Pool, 
 		}
 	}
 	for _, object := range objects {
-		s, err := newObjectScanner(ctx, zctx, pool, object, filter, pruner, progress)
+		s, err := newObjectScanner(ctx, zctx, pool, snap, object, demand, filter, pruner, progress)
 		if err != nil {
 			pullersDone()
 			return nil, err
@@ -140,7 +154,29 @@ func newObjectsScanner(ctx context.Context, zctx *zed.Context, pool *lake.Pool, 
 	return merge.New(ctx, pullers, lake.ImportComparator(zctx, pool).Compare), nil
 }
 
-func newObjectScanner(ctx context.Context, zctx *zed.Context, pool *lake.Pool, object *data.Object, filter zbuf.Filter, pruner expr.Evaluator, progress *zbuf.Progress) (zbuf.Puller, error) {
+func newObjectScanner(ctx context.Context, zctx *zed.Context, pool *lake.Pool, snap commits.View, object *data.Object, demand demand.Demand,
+	filter zbuf.Filter, pruner expr.Evaluator, progress *zbuf.Progress) (zbuf.Puller, error) {
+	if snap != nil && snap.HasVector(object.ID) {
+		rc, err := pool.Storage().Get(ctx, object.VectorURI(pool.DataPath))
+		if err != nil {
+			return nil, err
+		}
+		zr, err := vngio.NewReader(zctx, rc, demand)
+		if err != nil {
+			rc.Close()
+			return nil, err
+		}
+		scanner, err := zbuf.NewScanner(ctx, zr, filter)
+		if err != nil {
+			rc.Close()
+			return nil, err
+		}
+		return &statScanner{
+			scanner:  scanner,
+			closer:   rc,
+			progress: progress,
+		}, nil
+	}
 	ranges, err := data.LookupSeekRange(ctx, pool.Storage(), pool.DataPath, object, pruner)
 	if err != nil {
 		return nil, err

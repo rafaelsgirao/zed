@@ -285,7 +285,7 @@ func (b *Builder) compileLeaf(o dag.Op, parent zbuf.Puller) (zbuf.Puller, error)
 				return nil, err
 			}
 		}
-		return meta.NewSequenceScanner(b.octx, parent, pool, b.PushdownOf(v.Filter), pruner, b.progress), nil
+		return meta.NewSequenceScanner(b.octx, parent, pool, v.Demand, b.PushdownOf(v.Filter), pruner, b.progress), nil
 	case *dag.Deleter:
 		pool, err := b.lookupPool(v.Pool)
 		if err != nil {
@@ -610,7 +610,7 @@ func (b *Builder) compilePoolScan(scan *dag.PoolScan) (zbuf.Puller, error) {
 		return nil, err
 	}
 	slicer := meta.NewSlicer(l, b.mctx)
-	return meta.NewSequenceScanner(b.octx, slicer, pool, nil, nil, b.progress), nil
+	return meta.NewSequenceScanner(b.octx, slicer, pool, nil, nil, nil, b.progress), nil
 }
 
 func (b *Builder) PushdownOf(e dag.Expr) *Filter {

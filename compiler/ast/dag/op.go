@@ -10,6 +10,7 @@ package dag
 import (
 	"slices"
 
+	"github.com/brimdata/zed/compiler/optimizer/demand"
 	"github.com/brimdata/zed/order"
 	"github.com/brimdata/zed/pkg/field"
 	"github.com/segmentio/ksuid"
@@ -165,10 +166,11 @@ type (
 		Kind string `json:"kind" unpack:""`
 	}
 	SeqScan struct {
-		Kind      string      `json:"kind" unpack:""`
-		Pool      ksuid.KSUID `json:"pool"`
-		Filter    Expr        `json:"filter"`
-		KeyPruner Expr        `json:"key_pruner"`
+		Kind      string        `json:"kind" unpack:""`
+		Pool      ksuid.KSUID   `json:"pool"`
+		Demand    demand.Demand `json:"demand"`
+		Filter    Expr          `json:"filter"`
+		KeyPruner Expr          `json:"key_pruner"`
 	}
 	Deleter struct {
 		Kind      string      `json:"kind" unpack:""`
