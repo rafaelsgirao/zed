@@ -162,13 +162,16 @@ type (
 		Commit    ksuid.KSUID `json:"commit"`
 		KeyPruner Expr        `json:"key_pruner"`
 	}
-	VecLister struct {
-		Kind   string      `json:"kind" unpack:""`
-		Pool   ksuid.KSUID `json:"pool"`
-		Commit ksuid.KSUID `json:"commit"`
-	}
 	Slicer struct {
 		Kind string `json:"kind" unpack:""`
+	}
+	// Splitter routes input values (which describe lake data objects, as from
+	// Lister) to its paths according to whether or not the data object has vectors.
+	Splitter struct {
+		Kind       string `unpack:""`
+		ScalarPath Seq    // Usually starts with SeqScan.
+		// VectorPath is executed by the vector engine.
+		VectorPath Seq // Usually starts with VecScan.
 	}
 	SeqScan struct {
 		Kind      string      `json:"kind" unpack:""`
@@ -176,7 +179,7 @@ type (
 		Filter    Expr        `json:"filter"`
 		KeyPruner Expr        `json:"key_pruner"`
 	}
-	VecSeqScan struct {
+	VecScan struct {
 		Kind   string        `json:"kind" unpack:""`
 		Pool   ksuid.KSUID   `json:"pool"`
 		Demand demand.Demand `json:"demand"`
@@ -262,12 +265,12 @@ func (*LakeMetaScan) OpNode()   {}
 func (*PoolMetaScan) OpNode()   {}
 func (*CommitMetaScan) OpNode() {}
 
-func (*Lister) OpNode()     {}
-func (*VecLister) OpNode()  {}
-func (*Slicer) OpNode()     {}
-func (*SeqScan) OpNode()    {}
-func (*VecSeqScan) OpNode() {}
-func (*Deleter) OpNode()    {}
+func (*Lister) OpNode()   {}
+func (*Slicer) OpNode()   {}
+func (*Splitter) OpNode() {}
+func (*SeqScan) OpNode()  {}
+func (*VecScan) OpNode()  {}
+func (*Deleter) OpNode()  {}
 
 // Various Op fields
 

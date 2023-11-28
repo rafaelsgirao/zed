@@ -462,10 +462,37 @@ func (c *canonDAG) op(p dag.Op) {
 			c.write(")")
 		}
 		c.close()
+	case *dag.VecScan:
+		c.next()
+		c.open("vecscan")
+		c.write(" pool %s", p.Pool)
+		if p.Demand != nil {
+			c.write(" demand %v", p.Demand)
+		}
+		c.close()
 	case *dag.Slicer:
 		c.next()
 		c.open("slicer")
 		c.close()
+	case *dag.Splitter:
+		c.next()
+		c.open("splitter (")
+		c.ret()
+		c.write("scalar =>")
+		c.open()
+		c.head = true
+		c.seq(p.ScalarPath)
+		c.close()
+		c.ret()
+		c.write("vector =>")
+		c.open()
+		c.head = true
+		c.seq(p.VectorPath)
+		c.close()
+		c.close()
+		c.ret()
+		c.flush()
+		c.write(")")
 	case *dag.Over:
 		c.over(p)
 	case *dag.Yield:

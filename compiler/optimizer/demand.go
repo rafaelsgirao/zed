@@ -9,7 +9,7 @@ func insertDemand(seq dag.Seq) dag.Seq {
 	demands := InferDemandSeqOut(seq)
 	return walk(seq, true, func(seq dag.Seq) dag.Seq {
 		for _, op := range seq {
-			if vecOp, ok := op.(*dag.VecSeqScan); ok {
+			if vecOp, ok := op.(*dag.VecScan); ok {
 				vecOp.Demand = demands[op]
 			}
 		}

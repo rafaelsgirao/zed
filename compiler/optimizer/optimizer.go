@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/brimdata/zed/compiler/ast/dag"
 	"github.com/brimdata/zed/compiler/data"
@@ -87,6 +86,9 @@ func walk(seq dag.Seq, over bool, post func(dag.Seq) dag.Seq) dag.Seq {
 			}
 		case *dag.Scope:
 			op.Body = walk(op.Body, over, post)
+		case *dag.Splitter:
+			op.ScalarPath = walk(op.ScalarPath, over, post)
+			op.VectorPath = walk(op.VectorPath, over, post)
 		}
 	}
 	return post(seq)
@@ -117,6 +119,16 @@ func walkEntries(seq dag.Seq, post func(dag.Seq) (dag.Seq, error)) (dag.Seq, err
 				return nil, err
 			}
 			op.Body = seq
+		case *dag.Splitter:
+			var err error
+			op.ScalarPath, err = walkEntries(op.ScalarPath, post)
+			if err != nil {
+				return nil, err
+			}
+			op.VectorPath, err = walkEntries(op.VectorPath, post)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	return post(seq)
@@ -205,60 +217,50 @@ func (o *Optimizer) optimizeSourcePaths(seq dag.Seq) (dag.Seq, error) {
 		filter, chain := matchFilter(chain)
 		switch op := seq[0].(type) {
 		case *dag.PoolScan:
-			seq = dag.Seq{}
-			if os.Getenv("ZED_USE_VECTOR") != "" {
-				// TODO Decide whether to use vectors based on whether zng files exist and whether sorting is needed.
-				seq = dag.Seq{
-					&dag.VecLister{
-						Kind:   "VecLister",
-						Pool:   op.ID,
-						Commit: op.Commit,
+			// Here we transform a PoolScan into a Lister followed by one or more chains
+			// of slicers and sequence scanners.  We'll eventually choose other configurations
+			// here based on metadata and availability of VNG.
+			lister := &dag.Lister{
+				Kind:   "Lister",
+				Pool:   op.ID,
+				Commit: op.Commit,
+			}
+			// Check to see if we can add a range pruner when the pool key is used
+			// in a normal filtering operation.
+			sortKey, err := o.sortKeyOfSource(op)
+			if err != nil {
+				return nil, err
+			}
+			lister.KeyPruner = maybeNewRangePruner(filter, sortKey)
+			splitter := &dag.Splitter{
+				Kind: "Splitter",
+				ScalarPath: dag.Seq{
+					&dag.SeqScan{
+						Kind:      "SeqScan",
+						Pool:      op.ID,
+						Filter:    filter,
+						KeyPruner: lister.KeyPruner,
 					},
-					&dag.VecSeqScan{
-						Kind: "VecSeqScan",
+				},
+				VectorPath: dag.Seq{
+					&dag.VecScan{
+						Kind: "SeqScan",
 						Pool: op.ID,
 					},
-				}
-				if filter != nil {
-					// TODO Push filter into VecLister and VecSeqScan where possible.
-					seq = append(seq,
-						&dag.Filter{
-							Kind: "Filter",
-							Expr: filter,
-						})
-				}
-			} else {
-				// Here we transform a PoolScan into a Lister followed by one or more chains
-				// of slicers and sequence scanners.
-				lister := &dag.Lister{
-					Kind:   "Lister",
-					Pool:   op.ID,
-					Commit: op.Commit,
-				}
-				// Check to see if we can add a range pruner when the pool key is used
-				// in a normal filtering operation.
-				sortKey, err := o.sortKeyOfSource(op)
-				if err != nil {
-					return nil, err
-				}
-				lister.KeyPruner = maybeNewRangePruner(filter, sortKey)
-				seq = dag.Seq{lister}
-				_, _, orderRequired, _, err := o.concurrentPath(chain, sortKey)
-				if err != nil {
-					return nil, err
-				}
-				if orderRequired {
-					seq = append(seq, &dag.Slicer{Kind: "Slicer"})
-				}
-				seq = append(seq, &dag.SeqScan{
-					Kind:      "SeqScan",
-					Pool:      op.ID,
-					Filter:    filter,
-					KeyPruner: lister.KeyPruner,
+				},
+			}
+			if _, _, orderRequired, _, err := o.concurrentPath(chain, sortKey); err != nil {
+				return nil, err
+			} else if orderRequired {
+				splitter.ScalarPath.Prepend(&dag.Slicer{Kind: "Slicer"})
+			}
+			if filter != nil {
+				splitter.VectorPath.Append(&dag.Filter{
+					Kind: "Filter",
+					Expr: filter,
 				})
 			}
-			seq = append(seq, chain...)
-
+			seq = append(dag.Seq{lister, splitter}, chain...)
 		case *dag.FileScan:
 			op.Filter = filter
 			seq = append(dag.Seq{op}, chain...)
@@ -448,14 +450,11 @@ func (o *Optimizer) Parallelize(seq dag.Seq, n int) (dag.Seq, error) {
 		}
 		var front dag.Seq
 		var tail []dag.Op
-		if lister, slicer, rest := matchSource(seq); lister != nil {
+		if lister, splitter, rest, ok := matchSource(seq); ok {
 			// We parallelize the scanning to achieve the desired concurrency,
 			// then the step below pulls downstream operators into the parallel
 			// branches when possible, e.g., to parallelize aggregations etc.
 			front.Append(lister)
-			if slicer != nil {
-				front.Append(slicer)
-			}
 			tail = rest
 		} else if reader, ok := seq[0].(*kernel.Reader); ok {
 			front.Append(reader)
@@ -492,20 +491,19 @@ func (o *Optimizer) lookupPool(id ksuid.KSUID) (*lake.Pool, error) {
 	return o.lake.OpenPool(o.ctx, id)
 }
 
-func matchSource(ops []dag.Op) (*dag.Lister, *dag.Slicer, []dag.Op) {
+func matchSource(ops []dag.Op) (*dag.Lister, *dag.Splitter, []dag.Op, bool) {
+	if len(ops) <= 1 {
+		return nil, nil, nil, false
+	}
 	lister, ok := ops[0].(*dag.Lister)
 	if !ok {
-		return nil, nil, nil
+		return nil, nil, nil, false
 	}
-	ops = ops[1:]
-	slicer, ok := ops[0].(*dag.Slicer)
-	if ok {
-		ops = ops[1:]
+	splitter, ok := ops[1].(*dag.Splitter)
+	if !ok {
+		return nil, nil, nil, false
 	}
-	if _, ok := ops[0].(*dag.SeqScan); !ok {
-		panic("parseSource: no SeqScan")
-	}
-	return lister, slicer, ops
+	return lister, splitter, ops[2:], true
 }
 
 // matchFilter attempts to find a filter from the front of op chain

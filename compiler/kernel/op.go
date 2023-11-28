@@ -31,6 +31,7 @@ import (
 	"github.com/brimdata/zed/runtime/op/pass"
 	"github.com/brimdata/zed/runtime/op/shape"
 	"github.com/brimdata/zed/runtime/op/sort"
+	"github.com/brimdata/zed/runtime/op/splitter"
 	"github.com/brimdata/zed/runtime/op/switcher"
 	"github.com/brimdata/zed/runtime/op/tail"
 	"github.com/brimdata/zed/runtime/op/top"
@@ -271,15 +272,6 @@ func (b *Builder) compileLeaf(o dag.Op, parent zbuf.Puller) (zbuf.Puller, error)
 			}
 		}
 		return meta.NewSortedLister(b.octx.Context, b.mctx, b.source.Lake(), pool, v.Commit, pruner)
-	case *dag.VecLister:
-		if parent != nil {
-			return nil, errors.New("internal error: data source cannot have a parent operator")
-		}
-		pool, err := b.lookupPool(v.Pool)
-		if err != nil {
-			return nil, err
-		}
-		return meta.NewVecLister(b.octx.Context, b.mctx, b.source.Lake(), pool, v.Commit)
 	case *dag.Slicer:
 		return meta.NewSlicer(parent, b.mctx), nil
 	case *dag.SeqScan:
@@ -295,7 +287,7 @@ func (b *Builder) compileLeaf(o dag.Op, parent zbuf.Puller) (zbuf.Puller, error)
 			}
 		}
 		return meta.NewSequenceScanner(b.octx, parent, pool, b.PushdownOf(v.Filter), pruner, b.progress), nil
-	case *dag.VecSeqScan:
+	case *dag.VecScan:
 		pool, err := b.lookupPool(v.Pool)
 		if err != nil {
 			return nil, err
@@ -545,6 +537,8 @@ func (b *Builder) compile(o dag.Op, parents []zbuf.Puller) ([]zbuf.Puller, error
 		return b.compileScatter(o, parents)
 	case *dag.Scope:
 		return b.compileScope(o, parents)
+	case *dag.Splitter:
+		return b.compileSplitter(o, parents)
 	case *dag.Switch:
 		if o.Expr != nil {
 			return b.compileExprSwitch(o, parents)
@@ -610,6 +604,25 @@ func (b *Builder) compile(o dag.Op, parents []zbuf.Puller) ([]zbuf.Puller, error
 		}
 		return []zbuf.Puller{p}, nil
 	}
+}
+
+func (b *Builder) compileSplitter(s *dag.Splitter, parents []zbuf.Puller) ([]zbuf.Puller, error) {
+	if len(parents) != 1 {
+		return nil, errors.New("internal error: splitter operator requires a single parent")
+	}
+	scalarParent, vectorParent, err := splitter.New(b.octx, parents[0])
+	if err != nil {
+		return nil, err
+	}
+	scalarPath, err := b.compileSeq(s.ScalarPath, []zbuf.Puller{scalarParent})
+	if err != nil {
+		return nil, err
+	}
+	vectorPath, err := b.compileSeq(s.VectorPath, []zbuf.Puller{vectorParent})
+	if err != nil {
+		return nil, err
+	}
+	return append(scalarPath, vectorPath...), nil
 }
 
 func (b *Builder) compilePoolScan(scan *dag.PoolScan) (zbuf.Puller, error) {
@@ -678,7 +691,7 @@ func isEntry(seq dag.Seq) bool {
 		return false
 	}
 	switch op := seq[0].(type) {
-	case *Reader, *dag.Lister, *dag.VecLister, *dag.FileScan, *dag.HTTPScan, *dag.PoolScan, *dag.LakeMetaScan, *dag.PoolMetaScan, *dag.CommitMetaScan:
+	case *Reader, *dag.Lister, *dag.FileScan, *dag.HTTPScan, *dag.PoolScan, *dag.LakeMetaScan, *dag.PoolMetaScan, *dag.CommitMetaScan:
 		return true
 	case *dag.Scope:
 		return isEntry(op.Body)
